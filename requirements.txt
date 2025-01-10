@@ -1,0 +1,4 @@
+pytz>=2023.3
+pythoncom>=0.0.0
+pywin32>=306
+queue>=0.0.0 
