@@ -8,7 +8,7 @@ from kiteconnect import KiteTicker
 from datetime import datetime
 import pytz
 from src.utils.auth import ensure_valid_tokens
-from src.utils.constants import SPOT_TOKENS, STRIKE_GAPS, SYMBOL_TOKEN_MAP
+from src.utils.constants import SPOT_TOKENS, STRIKE_GAPS, SYMBOL_TOKEN_MAP, FUTURES_NAME_MAP
 import requests
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ class ExcelWebSocketHandler:
         self.connected = False
         self.market_data: Dict[str, Dict[str, Any]] = {}
         self.options_data: Dict[str, Dict[str, Any]] = {}
+        self.futures_data: Dict[str, Dict[str, Any]] = {}  # Add futures data dictionary
         self._lock = threading.Lock()
         self._reconnect_count = 0
         self.MAX_RECONNECTS = 5
@@ -94,8 +95,7 @@ class ExcelWebSocketHandler:
     def _on_ticks(self, ws, ticks):
         """Handle incoming tick data."""
         try:
-            print("\n" + "="*50)
-            print(f"Received {len(ticks)} ticks at {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}")
+            current_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
             
             # Process each tick
             for tick in ticks:
@@ -137,12 +137,8 @@ class ExcelWebSocketHandler:
                                 'bid_qty': buy_depth.get('quantity', 0),
                                 'ask_price': sell_depth.get('price', 0.0),
                                 'ask_qty': sell_depth.get('quantity', 0),
-                                'timestamp': datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
+                                'timestamp': current_time
                             }
-                            print(f"\nUpdated {symbol}:")
-                            print(f"LTP: ₹{last_price:,.2f}")
-                            print(f"Change: {change_percent:+.2f}%")
-                            print(f"OHLC: {ohlc.get('open', 0.0)}/{ohlc.get('high', 0.0)}/{ohlc.get('low', 0.0)}/{ohlc.get('close', 0.0)}")
                             
                             # Subscribe to options if not already done
                             if not hasattr(self, 'options_subscribed'):
@@ -150,55 +146,73 @@ class ExcelWebSocketHandler:
                                     print("\nAttempting to subscribe to options...")
                                     self._subscribe_options(self.market_data)
                                     self.options_subscribed = True
-                        else:
+                        elif symbol.endswith('FUT'):
+                            # This is a futures contract
+                            # Calculate volume from trades
+                            trades = tick.get('trades', [])
+                            if trades:
+                                volume = sum(trade.get('quantity', 0) for trade in trades)
+                                # Add to cumulative volume
+                                self.last_traded_volumes[symbol] = self.last_traded_volumes.get(symbol, 0) + volume
+                            else:
+                                # If no trades in this tick, use the volume field
+                                tick_volume = tick.get('volume', 0)
+                                if tick_volume > self.last_traded_volumes.get(symbol, 0):
+                                    self.last_traded_volumes[symbol] = tick_volume
+                            
+                            self.futures_data[symbol] = {
+                                'token': token,
+                                'symbol': symbol,
+                                'last_price': last_price,
+                                'change': change,
+                                'change_percent': change_percent,
+                                'volume': self.last_traded_volumes.get(symbol, 0),
+                                'open': ohlc.get('open', 0.0),
+                                'high': ohlc.get('high', 0.0),
+                                'low': ohlc.get('low', 0.0),
+                                'close': ohlc.get('close', 0.0),
+                                'oi': tick.get('oi', 0),
+                                'bid_price': buy_depth.get('price', 0.0),
+                                'bid_qty': buy_depth.get('quantity', 0),
+                                'ask_price': sell_depth.get('price', 0.0),
+                                'ask_qty': sell_depth.get('quantity', 0),
+                                'timestamp': current_time
+                            }
+                            
+                        elif '_PE' in symbol or '_CE' in symbol:
                             # This is an options contract
-                            # Extract strike and option type from symbol
-                            if '_PE' in symbol or '_CE' in symbol:
-                                strike = float(symbol.split('_')[0])
-                                option_type = symbol.split('_')[1]  # PE or CE
-                                
-                                self.options_data[symbol] = {
-                                    'token': token,
-                                    'symbol': symbol,
-                                    'strike': strike,
-                                    'option_type': option_type,
-                                    'last_price': last_price,
-                                    'change': change,
-                                    'change_percent': change_percent,
-                                    'volume': tick.get('volume', 0),
-                                    'oi': tick.get('oi', 0),
-                                    'bid_price': buy_depth.get('price', 0.0),
-                                    'bid_qty': buy_depth.get('quantity', 0),
-                                    'ask_price': sell_depth.get('price', 0.0),
-                                    'ask_qty': sell_depth.get('quantity', 0),
-                                    'timestamp': datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
-                                }
-                                print(f"\nUpdated {symbol}:")
-                                print(f"Strike: {strike}")
-                                print(f"LTP: ₹{last_price:,.2f}")
-                                print(f"Change: {change_percent:+.2f}%")
-                                print(f"OI: {tick.get('oi', 0):,}")
+                            strike = float(symbol.split('_')[0])
+                            option_type = symbol.split('_')[1]  # PE or CE
+                            
+                            self.options_data[symbol] = {
+                                'token': token,
+                                'symbol': symbol,
+                                'strike': strike,
+                                'option_type': option_type,
+                                'last_price': last_price,
+                                'change': change,
+                                'change_percent': change_percent,
+                                'volume': tick.get('volume', 0),
+                                'oi': tick.get('oi', 0),
+                                'bid_price': buy_depth.get('price', 0.0),
+                                'bid_qty': buy_depth.get('quantity', 0),
+                                'ask_price': sell_depth.get('price', 0.0),
+                                'ask_qty': sell_depth.get('quantity', 0),
+                                'timestamp': current_time
+                            }
                 else:
                     print(f"Unknown token: {token}")
             
             # Update Excel after processing all ticks
             try:
                 market_data = self.get_market_data()
+                futures_data = self.get_futures_data()
                 options_data = self.get_options_data()
-                print("\nUpdating Excel with:")
-                print(f"Market Data ({len(market_data)} symbols):")
-                for sym, data in market_data.items():
-                    print(f"  {sym}: ₹{data.get('last_price', 0):,.2f} ({data.get('change_percent', 0):+.2f}%)")
-                print(f"\nOptions Data ({len(options_data)} contracts)")
-                for sym, data in options_data.items():
-                    print(f"  {sym}: ₹{data.get('last_price', 0):,.2f} ({data.get('change_percent', 0):+.2f}%)")
-                self.excel_updater.update_data(market_data, options_data)
-                print(f"Excel updated with {len(market_data)} market symbols and {len(options_data)} options")
+                
+                self.excel_updater.update_data(market_data, futures_data, options_data)
             except Exception as e:
                 print(f"Error updating Excel: {str(e)}")
                 logger.error(f"Error updating Excel: {str(e)}", exc_info=True)
-                    
-            print("="*50)
                     
         except Exception as e:
             print(f"Error processing ticks: {str(e)}")
@@ -222,6 +236,9 @@ class ExcelWebSocketHandler:
             
             print("Successfully subscribed to spot tokens")
             
+            # Subscribe to futures
+            self._subscribe_futures()
+            
             # Start heartbeat thread to ensure connection is alive
             def heartbeat():
                 while self.connected:
@@ -230,7 +247,7 @@ class ExcelWebSocketHandler:
                         print(f"\nHeartbeat - {ist_now.strftime('%H:%M:%S')} IST")
                         print(f"Connection Status: {'Connected' if self.connected else 'Disconnected'}")
                         print(f"Market Data Points: {len(self.market_data)}")
-                        print(f"Options Data Points: {len(self.options_data)}")
+                        # print(f"Options Data Points: {len(self.options_data)}")   #TODO: Uncomment this to see options data
                         
                         time.sleep(5)  # Check every 5 seconds
                     except Exception as e:
@@ -246,6 +263,153 @@ class ExcelWebSocketHandler:
             logger.error(f"Error in subscription: {str(e)}")
             print(f"Error in subscription: {str(e)}")
             self._handle_reconnect()
+
+    def _subscribe_futures(self):
+        """Subscribe to futures instruments."""
+        try:
+            print("\nFetching futures instruments...")
+            headers = {
+                'Authorization': f'enctoken {self.enctoken}',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/csv',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            }
+            
+            futures_tokens = []
+            
+            # Get current date for expiry comparison
+            current_date = datetime.now(pytz.timezone('Asia/Kolkata')).date()
+            
+            # Map index names to their futures symbols and exchanges
+            index_futures_map = {
+                'NFO': {
+                    'NIFTY 50': 'NIFTY',
+                    'NIFTY BANK': 'BANKNIFTY',
+                    'NIFTY FIN SERVICE': 'FINNIFTY',
+                    'NIFTY MID SELECT': 'MIDCPNIFTY'
+                },
+                'BFO': {
+                    'SENSEX': 'SENSEX'
+                }
+            }
+            
+            # Store last traded volumes for each symbol
+            self.last_traded_volumes = {}
+            
+            # Fetch from NFO and BFO with their respective indices
+            for exchange, symbols in index_futures_map.items():
+                try:
+                    print(f"\nFetching {exchange} instruments...")
+                    response = requests.get('https://api.kite.trade/instruments', headers=headers)
+                    print(f"{exchange} response status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        print(f"Successfully fetched {exchange} instruments")
+                        instruments = response.text.strip().split('\n')
+                        instruments = [row.split(',') for row in instruments[1:]]  # Skip header
+                        
+                        # Store nearest expiry contracts for each symbol
+                        nearest_expiry_contracts = {}
+                        
+                        for row in instruments:
+                            try:
+                                if len(row) < 12:  # Basic validation
+                                    continue
+                                
+                                instrument_token = int(row[0])
+                                tradingsymbol = row[2]
+                                name = row[3].strip('"')
+                                expiry = datetime.strptime(row[5], '%Y-%m-%d').date() if row[5] else None
+                                instrument_type = row[9]
+                                segment = row[10]
+                                exchange_from_row = row[11]
+                                
+                                # Only process instruments from the current exchange
+                                if exchange_from_row != exchange:
+                                    continue
+                                
+                                # Process only futures instruments
+                                if instrument_type == 'FUT':
+                                    # Check for each symbol we're interested in
+                                    for display_name, futures_symbol in symbols.items():
+                                        if tradingsymbol.startswith(futures_symbol):
+                                            # Only consider if expiry is in the future
+                                            if expiry and expiry >= current_date:
+                                                # Initialize or update nearest expiry contract
+                                                if display_name not in nearest_expiry_contracts or \
+                                                   expiry < nearest_expiry_contracts[display_name]['expiry']:
+                                                    nearest_expiry_contracts[display_name] = {
+                                                        'token': instrument_token,
+                                                        'symbol': tradingsymbol,
+                                                        'expiry': expiry,
+                                                        'display_name': display_name
+                                                    }
+                                                    print(f"Found {futures_symbol} futures expiring on {expiry}")
+                            
+                            except (IndexError, ValueError) as e:
+                                print(f"Error processing row: {str(e)}")
+                                continue
+                        
+                        # Subscribe to the nearest expiry contracts
+                        for contract_info in nearest_expiry_contracts.values():
+                            token = contract_info['token']
+                            display_name = contract_info['display_name']
+                            expiry = contract_info['expiry']
+                            
+                            futures_tokens.append(token)
+                            # Store with the format expected by the Excel updater
+                            display_name_map = {
+                                'NIFTY 50': 'NIFTY',
+                                'NIFTY BANK': 'BANKNIFTY',
+                                'NIFTY FIN SERVICE': 'FINNIFTY',
+                                'NIFTY MID SELECT': 'MIDCPNIFTY',
+                                'SENSEX': 'SENSEX'
+                            }
+                            excel_symbol = f"{display_name_map[display_name]} FUT"
+                            self.token_symbol_map[str(token)] = excel_symbol
+                            # Initialize volume tracking for this symbol
+                            self.last_traded_volumes[excel_symbol] = 0
+                            print(f"Added nearest futures token {token} for {display_name} expiring on {expiry}")
+                    
+                    else:
+                        print(f"Error getting {exchange} instruments: {response.status_code}")
+                        print(f"Response text: {response.text}")
+                        
+                except Exception as e:
+                    print(f"Error fetching {exchange} instruments: {str(e)}")
+                    print(f"Full error: ", exc_info=True)
+            
+            if futures_tokens:
+                print(f"\nSubscribing to {len(futures_tokens)} futures tokens: {futures_tokens}")
+                # Subscribe with LTP mode first for faster updates
+                self.kws.subscribe(futures_tokens)
+                self.kws.set_mode(self.kws.MODE_LTP, futures_tokens)
+                print("Subscribed to futures tokens in LTP mode")
+                
+                # Then set FULL mode for detailed data
+                time.sleep(0.5)  # Small delay before changing mode
+                self.kws.set_mode(self.kws.MODE_FULL, futures_tokens)
+                print("Changed futures tokens to FULL mode")
+                
+                print("Token to symbol mapping for futures:")
+                for token in futures_tokens:
+                    print(f"{token}: {self.token_symbol_map.get(str(token), 'Unknown')}")
+            else:
+                print("No valid futures tokens found!")
+                
+        except Exception as e:
+            logger.error(f"Error subscribing to futures: {str(e)}")
+            print(f"Error subscribing to futures: {str(e)}")
+            print("Full error: ", exc_info=True)
             
     def _subscribe_options(self, spot_prices: Dict[str, float]):
         """Subscribe to options based on spot prices."""
@@ -435,6 +599,11 @@ class ExcelWebSocketHandler:
         with self._lock:
             return self.options_data.copy()
             
+    def get_futures_data(self) -> Dict[str, Dict[str, Any]]:
+        """Get a copy of the current futures data."""
+        with self._lock:
+            return self.futures_data.copy()
+            
     def _update_options_chain(self, symbol: str, spot_price: float):
         """Update options chain data for the given symbol."""
         try:
@@ -474,3 +643,4 @@ class ExcelWebSocketHandler:
             
         except Exception as e:
             logger.error(f"Error updating options chain for {symbol}: {str(e)}") 
+
