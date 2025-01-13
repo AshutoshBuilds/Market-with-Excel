@@ -231,15 +231,15 @@ class ExcelUpdater:
                                 
                                 # Color the change cell based on value
                                 if change >= 0:
-                                    ws.Cells(row, 3).Font.Color = 0x008000  # Green
+                                    ws.Cells(row, 3).Interior.Color = 0x008000  # Green
                                 else:
-                                    ws.Cells(row, 3).Font.Color = 0x0000FF  # Red
+                                    ws.Cells(row, 3).Interior.Color = 0x0000FF  # Red
                                 
                                 # Color the spot cell based on comparison with previous close
                                 if spot > close_price:
-                                    ws.Cells(row, 2).Font.Color = 0x008000  # Green
+                                    ws.Cells(row, 2).Interior.Color = 0x008000  # Green
                                 elif spot < close_price:
-                                    ws.Cells(row, 2).Font.Color = 0x0000FF  # Red
+                                    ws.Cells(row, 2).Interior.Color = 0x0000FF  # Red
                                 
                             except Exception as cell_error:
                                 logger.error(f"Error updating {index}: {str(cell_error)}")
@@ -295,11 +295,11 @@ class ExcelUpdater:
                                 
                                 # Color coding
                                 if change_percent >= 0:
-                                    ws.Cells(row, 3).Font.Color = 0x008000  # Green
-                                    ws.Cells(row, 2).Font.Color = 0x008000  # Green for LTP
+                                    ws.Cells(row, 3).Interior.Color = 0x008000  # Green
+                                    ws.Cells(row, 2).Interior.Color = 0x008000  # Green for LTP
                                 else:
-                                    ws.Cells(row, 3).Font.Color = 0x0000FF  # Red
-                                    ws.Cells(row, 2).Font.Color = 0x0000FF  # Red for LTP
+                                    ws.Cells(row, 3).Interior.Color = 0x0000FF  # Red
+                                    ws.Cells(row, 2).Interior.Color = 0x0000FF  # Red for LTP
                                 
                             except Exception as cell_error:
                                 logger.error(f"Error updating futures {symbol}: {str(cell_error)}")
@@ -344,10 +344,52 @@ class ExcelUpdater:
                                     ws.Cells(row, 6).Value = pe_data.get('ask_price', 0)   # PE Ask
                                 
                                 # Update spot price in middle
-                                spot_price = market_data.get(f"{index_name} 50" if index_name == "NIFTY" else 
-                                                          f"NIFTY {index_name}" if index_name in ["BANK", "FIN SERVICE", "MID SELECT"] else 
-                                                          index_name, {}).get('last_price', 0)
+                                spot_symbol = {
+                                    'NIFTY': 'NIFTY 50',
+                                    'BANKNIFTY': 'NIFTY BANK',
+                                    'FINNIFTY': 'NIFTY FIN SERVICE',
+                                    'MIDCPNIFTY': 'NIFTY MID SELECT',
+                                    'SENSEX': 'SENSEX'
+                                }[index_name]
+                                spot_price = market_data.get(spot_symbol, {}).get('last_price', 0)
                                 ws.Cells(row, 7).Value = spot_price
+                                
+                                # Get strike value
+                                strike = float(ws.Cells(row, 1).Value)
+                                
+                                # Find ATM strike (closest to spot price)
+                                atm_strike = min(sorted_strikes, key=lambda x: abs(x - spot_price))
+                                
+                                # Color the entire row based on ATM/ITM/OTM
+                                row_range = ws.Range(ws.Cells(row, 1), ws.Cells(row, 12))  # From Strike to CE OI
+                                if strike == atm_strike:  # ATM - exact match only
+                                    row_range.Interior.Color = 0x00FFFF  # Cyan for ATM
+                                    ws.Cells(row, 1).Interior.Color = 0x00FFFF  # Strike column
+                                    for col in range(2, 13):  # Color all columns except spot
+                                        if col != 7:  # Skip spot column
+                                            ws.Cells(row, col).Interior.Color = 0x00FFFF
+                                else:
+                                    # Split the row into PE and CE sections
+                                    pe_range = ws.Range(ws.Cells(row, 1), ws.Cells(row, 6))  # Strike to PE Ask
+                                    ce_range = ws.Range(ws.Cells(row, 8), ws.Cells(row, 12))  # CE Bid to CE OI
+                                    
+                                    # For CE: ITM when strike < spot, OTM when strike > spot
+                                    if strike < spot_price:  # ITM for CE
+                                        ce_range.Interior.Color = 0x90EE90  # Light green
+                                    else:  # OTM for CE
+                                        ce_range.Interior.Color = 0xE6E6FA  # Light purple
+                                    
+                                    # For PE: ITM when strike > spot, OTM when strike < spot
+                                    if strike > spot_price:  # ITM for PE
+                                        pe_range.Interior.Color = 0x90EE90  # Light green
+                                    else:  # OTM for PE
+                                        pe_range.Interior.Color = 0xE6E6FA  # Light purple
+                                    
+                                    # Keep strike column with PE color
+                                    ws.Cells(row, 1).Interior.Color = pe_range.Interior.Color
+                                
+                                # Keep spot column white for better readability
+                                ws.Cells(row, 7).Interior.ColorIndex = 0  # No color for spot column
                                 
                                 # Update CE data if available
                                 if ce_data:
@@ -362,18 +404,34 @@ class ExcelUpdater:
                                 # Force immediate update
                                 ws.Range(f"A{row}:M{row}").Value = ws.Range(f"A{row}:M{row}").Value
                                 
-                                # Color coding for options
-                                if pe_data:
-                                    pe_change = pe_data.get('change_percent', 0)
-                                    ws.Cells(row, 4).Font.Color = 0x008000 if pe_change >= 0 else 0x0000FF
-                                
-                                if ce_data:
-                                    ce_change = ce_data.get('change_percent', 0)
-                                    ws.Cells(row, 10).Font.Color = 0x008000 if ce_change >= 0 else 0x0000FF
+                                # Keep spot column white for better readability
+                                ws.Cells(row, 7).Interior.ColorIndex = 0  # No color for spot column
                                 
                             except Exception as cell_error:
                                 logger.error(f"Error updating options for {index_name} strike {strike}: {str(cell_error)}")
                                 continue
+                    
+                    # Update options data
+                    if options_data:
+                        for index_name in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX']:
+                            # Get spot price for this index
+                            spot_symbol = {
+                                'NIFTY': 'NIFTY 50',
+                                'BANKNIFTY': 'NIFTY BANK',
+                                'FINNIFTY': 'NIFTY FIN SERVICE',
+                                'MIDCPNIFTY': 'NIFTY MID SELECT',
+                                'SENSEX': 'SENSEX'
+                            }[index_name]
+                            spot_price = market_data.get(spot_symbol, {}).get('last_price', 0)
+                            
+                            # Get all strikes for this index
+                            strikes = sorted(set(float(symbol.split('_')[1]) 
+                                              for symbol in options_data.keys() 
+                                              if symbol.startswith(index_name)))
+                            
+                            if strikes:
+                                # Find ATM strike (closest to spot price)
+                                atm_strike = min(strikes, key=lambda x: abs(x - spot_price))
                     
                     print(f"Excel updated at {current_time}")
                     

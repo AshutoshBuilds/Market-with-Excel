@@ -199,6 +199,17 @@ class ExcelWebSocketHandler:
                                     # The strike is the numeric part before CE/PE
                                     strike_str = ''.join(filter(str.isdigit, symbol.split('CE')[0].split('PE')[0][-6:]))
                                     strike = float(strike_str)
+                                    
+                                    # Fix strike prices by removing prefixes
+                                    if index_name == 'NIFTY' and strike > 50000:
+                                        strike_str = str(int(strike))
+                                        if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                                            strike = float(strike_str[1:])
+                                    elif index_name == 'SENSEX' and strike > 40000:
+                                        strike_str = str(int(strike))
+                                        if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                            strike = float(strike_str[1:])
+                                            
                                     option_type = 'CE' if 'CE' in symbol else 'PE'
                                     
                                     print(f"Extracted strike: {strike}, option type: {option_type}")
@@ -209,19 +220,19 @@ class ExcelWebSocketHandler:
                                     
                                     # Store options data with full symbol
                                     self.options_data[full_symbol] = {
-                                        'token': token,
+                                    'token': token,
                                         'symbol': full_symbol,
-                                        'strike': strike,
+                                    'strike': strike,
                                         'option_type': option_type,
-                                        'last_price': last_price,
-                                        'change': change,
-                                        'change_percent': change_percent,
-                                        'volume': tick.get('volume', 0),
-                                        'oi': tick.get('oi', 0),
-                                        'bid_price': buy_depth.get('price', 0.0),
-                                        'bid_qty': buy_depth.get('quantity', 0),
-                                        'ask_price': sell_depth.get('price', 0.0),
-                                        'ask_qty': sell_depth.get('quantity', 0),
+                                    'last_price': last_price,
+                                    'change': change,
+                                    'change_percent': change_percent,
+                                    'volume': tick.get('volume', 0),
+                                    'oi': tick.get('oi', 0),
+                                    'bid_price': buy_depth.get('price', 0.0),
+                                    'bid_qty': buy_depth.get('quantity', 0),
+                                    'ask_price': sell_depth.get('price', 0.0),
+                                    'ask_qty': sell_depth.get('quantity', 0),
                                         'timestamp': current_time
                                     }
                                     print(f"Updated options data for {full_symbol}:")
@@ -237,7 +248,7 @@ class ExcelWebSocketHandler:
                                 print(f"Full tick data: {tick}")
                 else:
                     print(f"Unknown token: {token}")
-            
+                    
             # Update Excel after processing all ticks
             try:
                 market_data = self.get_market_data()
@@ -319,7 +330,7 @@ class ExcelWebSocketHandler:
             logger.error(f"Error in subscription: {str(e)}")
             print(f"Error in subscription: {str(e)}")
             self._handle_reconnect()
-
+            
     def _subscribe_futures(self):
         """Subscribe to futures instruments."""
         try:
@@ -522,8 +533,20 @@ class ExcelWebSocketHandler:
                         instrument_type = row[9]  # CE or PE
                         exchange = row[11]
                         
-                        # Only process NFO instruments that are options and have future expiry
-                        if exchange == 'NFO' and instrument_type in ['CE', 'PE'] and expiry and expiry >= current_date:
+                        # Fix strike prices by removing prefixes
+                        if tradingsymbol.startswith('NIFTY') and strike > 50000:
+                            strike_str = str(int(strike))
+                            if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                                strike = float(strike_str[1:])
+                        elif tradingsymbol.startswith('SENSEX') and strike > 40000:
+                            strike_str = str(int(strike))
+                            if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                strike = float(strike_str[1:])
+                        
+                        # Only process NFO/BFO instruments that are options and have future expiry
+                        if ((exchange == 'NFO' and tradingsymbol.startswith(('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'))) or \
+                            (exchange == 'BFO' and tradingsymbol.startswith('SENSEX'))) and \
+                           instrument_type in ['CE', 'PE'] and expiry and expiry >= current_date:
                             # Store with all details needed for filtering
                             instrument_lookup[tradingsymbol] = {
                                 'token': instrument_token,
@@ -531,94 +554,117 @@ class ExcelWebSocketHandler:
                                 'expiry': expiry,
                                 'strike': strike,
                                 'type': instrument_type,
-                                'symbol': tradingsymbol
+                                'symbol': tradingsymbol,
+                                'exchange': exchange
                             }
                     except (IndexError, ValueError) as e:
                         continue
                 
-                print(f"\nProcessing {len(instrument_lookup)} NFO instruments...")
+                print(f"\nProcessing {len(instrument_lookup)} instruments...")
                 
                 for spot_symbol, index_info in index_map.items():
                     index_name = index_info['symbol']
                     expiry_type = index_info['expiry_type']
                     
-                    # Get current spot price from the correct symbol
+                # Get current spot price from the correct symbol
                     spot_data = next((data for sym, data in market_data.items() if sym == spot_symbol), None)
                     if spot_data:
                         spot_price = spot_data.get('last_price', 0)
-                        if spot_price > 0:
+                if spot_price > 0:
                             print(f"\nProcessing {index_name} at spot price {spot_price}")
-                            
-                            # Calculate ATM strike
-                            strike_gap = {
-                                'NIFTY 50': 50,
-                                'NIFTY BANK': 100,
-                                'NIFTY FIN SERVICE': 50,
-                                'NIFTY MID SELECT': 50,
-                                'SENSEX': 100
-                            }.get(spot_symbol, 50)
-                            
-                            atm_strike = round(spot_price / strike_gap) * strike_gap
-                            print(f"ATM strike: {atm_strike}")
-                            
-                            # Get 5 strikes above and below ATM
-                            strikes = [atm_strike + (i - 5) * strike_gap for i in range(11)]
-                            
-                            # Find instruments for this index
-                            matching_instruments = {
-                                symbol: info for symbol, info in instrument_lookup.items()
-                                if symbol.startswith(index_name)  # Match by index name prefix
-                            }
-                            
-                            if matching_instruments:
-                                # Get all expiries for this index
-                                expiries = sorted(set(info['expiry'] for info in matching_instruments.values() if info['expiry']))
+                    
+                    # Calculate ATM strike
+                    strike_gap = {
+                        'NIFTY': 50,
+                        'BANKNIFTY': 100,
+                        'FINNIFTY': 50,
+                        'MIDCPNIFTY': 50,
+                        'SENSEX': 100
+                    }.get(index_name, 50)
+                    
+                    atm_strike = round(spot_price / strike_gap) * strike_gap
+                    print(f"Index: {index_name}, Spot: {spot_price}, ATM: {atm_strike}, Gap: {strike_gap}")
+                    
+                    # Get 5 strikes above and below ATM
+                    strikes = [atm_strike + (i - 5) * strike_gap for i in range(11)]
+                    print(f"Generated strikes for {index_name}: {strikes}")
+                    
+                    # Find instruments for this index
+                    matching_instruments = {}
+                    for symbol, info in instrument_lookup.items():
+                        try:
+                            if symbol.startswith(index_name):  # Check if this is the right index
+                                strike = info['strike']  # Use strike from instrument info
                                 
-                                if expiries:
-                                    # For weekly expiry (NIFTY and SENSEX), get the nearest expiry
-                                    # For monthly expiry (others), get the nearest monthly expiry
-                                    if expiry_type == 'weekly':
-                                        nearest_expiry = min(expiries)
-                                    else:
-                                        # Filter for monthly expiry (last Thursday of the month)
-                                        monthly_expiries = [
-                                            expiry for expiry in expiries
-                                            if expiry.weekday() == 3  # Thursday
-                                            and (expiry + timedelta(days=7)).month != expiry.month  # Last Thursday
-                                        ]
-                                        if monthly_expiries:
-                                            nearest_expiry = min(monthly_expiries)
-                                        else:
-                                            nearest_expiry = min(expiries)  # Fallback to nearest expiry
-                                    
-                                    print(f"Found {len(matching_instruments)} matching instruments")
-                                    print(f"Using expiry: {nearest_expiry}")
-                                    
-                                    # Add PE and CE tokens for each strike
-                                    for strike in strikes:
-                                        # Try to find PE and CE contracts
-                                        for symbol, info in matching_instruments.items():
-                                            if (info['expiry'] == nearest_expiry and 
-                                                abs(info['strike'] - strike) < 0.01):  # Compare with small tolerance
-                                                
-                                                token = info['token']
-                                                opt_type = info['type']
-                                                
-                                                options_tokens.append(token)
-                                                # Store the full tradingsymbol in the token map
-                                                self.token_symbol_map[str(token)] = info['symbol']
-                                                print(f"Added {opt_type} token {token} for {index_name} {strike}")
-                
-                if options_tokens:
-                    print(f"\nSubscribing to {len(options_tokens)} options tokens")
-                    self.kws.subscribe(options_tokens)
-                    self.kws.set_mode(self.kws.MODE_FULL, options_tokens)
-                    print("Successfully subscribed to options tokens")
-                else:
-                    print("\nNo valid options tokens found to subscribe!")
+                                # Fix strike prices by removing prefixes
+                                if index_name == 'NIFTY' and strike > 50000:
+                                    strike_str = str(int(strike))
+                                    if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                                        strike = float(strike_str[1:])
+                                        info['strike'] = strike  # Update the strike in info
+                                elif index_name == 'SENSEX' and strike > 40000:
+                                    strike_str = str(int(strike))
+                                    if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                        strike = float(strike_str[1:])
+                                        info['strike'] = strike  # Update the strike in info
+                                
+                                if strike in strikes:
+                                    matching_instruments[symbol] = info
+                                    print(f"Matched {index_name} strike: {strike} from symbol: {symbol}")
+                        except Exception as e:
+                            print(f"Error processing symbol {symbol}: {str(e)}")
+                            continue
+                    
+                    if matching_instruments:
+                        print(f"\nFound {len(matching_instruments)} matching instruments for {index_name}")
+                        print(f"Sample strikes: {sorted(set(info['strike'] for info in matching_instruments.values()))[:5]}")
+                        print(f"Sample symbols: {list(matching_instruments.keys())[:2]}")
+                        
+                        # Get all expiries for this index
+                        expiries = sorted(set(info['expiry'] for info in matching_instruments.values() if info['expiry']))
+                        
+                        if expiries:
+                            # For weekly expiry (NIFTY and SENSEX), get the nearest expiry
+                            # For monthly expiry (others), get the nearest monthly expiry
+                            if expiry_type == 'weekly':
+                                nearest_expiry = min(expiries)
+                            else:
+                                # Filter for monthly expiry (last Thursday of the month)
+                                monthly_expiries = [
+                                    expiry for expiry in expiries
+                                    if expiry.weekday() == 3  # Thursday
+                                    and (expiry + timedelta(days=7)).month != expiry.month  # Last Thursday
+                                ]
+                                if monthly_expiries:
+                                    nearest_expiry = min(monthly_expiries)
+                                else:
+                                    nearest_expiry = min(expiries)  # Fallback to nearest expiry
+                            
+                            print(f"Found {len(matching_instruments)} matching instruments")
+                            print(f"Using expiry: {nearest_expiry}")
+                    
+                    # Add PE and CE tokens for each strike
+                    for strike in strikes:
+                        # Try to find PE and CE contracts
+                        for symbol, info in matching_instruments.items():
+                            if (info['expiry'] == nearest_expiry and 
+                                abs(info['strike'] - strike) < 0.01):  # Compare with small tolerance
+                                
+                                token = info['token']
+                                opt_type = info['type']
+                                
+                                options_tokens.append(token)
+                                # Store the full tradingsymbol in the token map
+                                self.token_symbol_map[str(token)] = info['symbol']
+                                print(f"Added {opt_type} token {token} for {index_name} {strike}")
+            
+            if options_tokens:
+                print(f"\nSubscribing to {len(options_tokens)} options tokens")
+                self.kws.subscribe(options_tokens)
+                self.kws.set_mode(self.kws.MODE_FULL, options_tokens)
+                print("Successfully subscribed to options tokens")
             else:
-                print(f"Error getting instruments: {response.status_code} - {response.text}")
-                
+                print("\nNo valid options tokens found to subscribe!")
         except Exception as e:
             logger.error(f"Error subscribing to options: {str(e)}", exc_info=True)
             print(f"Error subscribing to options: {str(e)}")
