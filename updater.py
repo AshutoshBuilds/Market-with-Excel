@@ -109,11 +109,73 @@ class ExcelUpdater:
             futures_data_range.Borders.LineStyle = 1
             futures_data_range.Borders.Weight = 2
             
+            # Set up options chain sections
+            options_start_row = futures_header_row + len(indices) + 2
+            
+            # Options headers
+            options_headers = [
+                "Strike",       # A
+                "PE OI",        # B
+                "PE Volume",    # C
+                "PE LTP",       # D
+                "PE Bid",       # E
+                "PE Ask",       # F
+                "Spot",         # G
+                "CE Bid",       # H
+                "CE Ask",       # I
+                "CE LTP",       # J
+                "CE Volume",    # K
+                "CE OI",        # L
+                "Last Updated"  # M
+            ]
+            
+            # Create options chain tables for each index
+            index_display_names = {
+                "NIFTY 50": "NIFTY",
+                "NIFTY BANK": "BANKNIFTY",
+                "NIFTY FIN SERVICE": "FINNIFTY",
+                "NIFTY MID SELECT": "MIDCPNIFTY",
+                "SENSEX": "SENSEX"
+            }
+            
+            current_row = options_start_row
+            self.options_rows = {}  # Store row positions for each index's options
+            
+            for index in indices:
+                # Add index name as header
+                ws.Cells(current_row, 1).Value = f"{index_display_names[index]} OPTIONS"
+                ws.Range(f"A{current_row}:M{current_row}").Merge()
+                ws.Range(f"A{current_row}:M{current_row}").HorizontalAlignment = -4108
+                ws.Range(f"A{current_row}:M{current_row}").Font.Bold = True
+                
+                # Add options headers
+                header_row = current_row + 1
+                for col, header in enumerate(options_headers, start=1):
+                    ws.Cells(header_row, col).Value = header
+                
+                # Format options headers
+                options_header_range = ws.Range(f"A{header_row}:M{header_row}")
+                options_header_range.Font.Bold = True
+                
+                # Store the starting row for this index's options data
+                self.options_rows[index_display_names[index]] = header_row + 1
+                
+                # Add space for 10 strikes (can be adjusted)
+                data_end_row = header_row + 10
+                
+                # Add borders
+                options_data_range = ws.Range(f"A{current_row}:M{data_end_row}")
+                options_data_range.Borders.LineStyle = 1
+                options_data_range.Borders.Weight = 2
+                
+                # Move to next section
+                current_row = data_end_row + 2
+            
             # Autofit all columns
             ws.Columns("A:N").AutoFit()
             
             # Center align all cells
-            ws.Range(f"A1:N{futures_header_row + len(indices)}").HorizontalAlignment = -4108
+            ws.Range(f"A1:N{current_row}").HorizontalAlignment = -4108
             
             logger.info("Excel connection initialized successfully")
             
@@ -243,11 +305,81 @@ class ExcelUpdater:
                                 logger.error(f"Error updating futures {symbol}: {str(cell_error)}")
                                 continue
                     
+                    # Update options section
+                    for index_name, start_row in self.options_rows.items():
+                        # Get options for this index
+                        index_options = {k: v for k, v in options_data.items() if k.startswith(index_name)}
+                        
+                        # Group options by strike
+                        strikes_data = {}
+                        for symbol, data in index_options.items():
+                            strike = data['strike']
+                            option_type = data['option_type']
+                            
+                            if strike not in strikes_data:
+                                strikes_data[strike] = {'PE': None, 'CE': None}
+                            strikes_data[strike][option_type] = data
+                        
+                        # Sort strikes
+                        sorted_strikes = sorted(strikes_data.keys())
+                        
+                        # Update each strike row
+                        for i, strike in enumerate(sorted_strikes[:10]):  # Limit to 10 strikes
+                            row = start_row + i
+                            
+                            # Get PE and CE data
+                            pe_data = strikes_data[strike]['PE']
+                            ce_data = strikes_data[strike]['CE']
+                            
+                            try:
+                                # Update strike price
+                                ws.Cells(row, 1).Value = strike
+                                
+                                # Update PE data if available
+                                if pe_data:
+                                    ws.Cells(row, 2).Value = pe_data.get('oi', 0)          # PE OI
+                                    ws.Cells(row, 3).Value = pe_data.get('volume', 0)      # PE Volume
+                                    ws.Cells(row, 4).Value = pe_data.get('last_price', 0)  # PE LTP
+                                    ws.Cells(row, 5).Value = pe_data.get('bid_price', 0)   # PE Bid
+                                    ws.Cells(row, 6).Value = pe_data.get('ask_price', 0)   # PE Ask
+                                
+                                # Update spot price in middle
+                                spot_price = market_data.get(f"{index_name} 50" if index_name == "NIFTY" else 
+                                                          f"NIFTY {index_name}" if index_name in ["BANK", "FIN SERVICE", "MID SELECT"] else 
+                                                          index_name, {}).get('last_price', 0)
+                                ws.Cells(row, 7).Value = spot_price
+                                
+                                # Update CE data if available
+                                if ce_data:
+                                    ws.Cells(row, 8).Value = ce_data.get('bid_price', 0)   # CE Bid
+                                    ws.Cells(row, 9).Value = ce_data.get('ask_price', 0)   # CE Ask
+                                    ws.Cells(row, 10).Value = ce_data.get('last_price', 0) # CE LTP
+                                    ws.Cells(row, 11).Value = ce_data.get('volume', 0)     # CE Volume
+                                    ws.Cells(row, 12).Value = ce_data.get('oi', 0)         # CE OI
+                                
+                                ws.Cells(row, 13).Value = current_time  # Last Updated
+                                
+                                # Force immediate update
+                                ws.Range(f"A{row}:M{row}").Value = ws.Range(f"A{row}:M{row}").Value
+                                
+                                # Color coding for options
+                                if pe_data:
+                                    pe_change = pe_data.get('change_percent', 0)
+                                    ws.Cells(row, 4).Font.Color = 0x008000 if pe_change >= 0 else 0x0000FF
+                                
+                                if ce_data:
+                                    ce_change = ce_data.get('change_percent', 0)
+                                    ws.Cells(row, 10).Font.Color = 0x008000 if ce_change >= 0 else 0x0000FF
+                                
+                            except Exception as cell_error:
+                                logger.error(f"Error updating options for {index_name} strike {strike}: {str(cell_error)}")
+                                continue
+                    
                     print(f"Excel updated at {current_time}")
                     
                 except Exception as e:
                     logger.error(f"Error in Excel worker: {str(e)}")
-            
+                    
         except Exception as e:
             logger.error(f"Error initializing Excel: {str(e)}")
         finally:
