@@ -24,6 +24,8 @@ class ExcelWebSocketHandler:
         self.market_data: Dict[str, Dict[str, Any]] = {}
         self.options_data: Dict[str, Dict[str, Any]] = {}
         self.futures_data: Dict[str, Dict[str, Any]] = {}  # Add futures data dictionary
+        self.instrument_lookup: Dict[str, Dict[str, Any]] = {}  # Initialize instrument lookup dictionary
+        self.last_traded_volumes: Dict[str, int] = {}  # Initialize volume tracking dictionary
         self._lock = threading.Lock()
         self._reconnect_count = 0
         self.MAX_RECONNECTS = 5
@@ -181,18 +183,18 @@ class ExcelWebSocketHandler:
                                 # Example tradingsymbol format: NIFTY2516123400CE
                                 # First, identify the index name
                                 index_name = None
-                                if symbol.startswith('NIFTY'):
+                                if symbol.startswith(('NIFTY2', 'NIFTY3')):
                                     index_name = 'NIFTY'
-                                elif symbol.startswith('BANKNIFTY'):
+                                elif symbol.startswith(('BANKNIFTY2', 'BANKNIFTY3')):
                                     index_name = 'BANKNIFTY'
-                                elif symbol.startswith('FINNIFTY'):
+                                elif symbol.startswith(('FINNIFTY2', 'FINNIFTY3')):
                                     index_name = 'FINNIFTY'
-                                elif symbol.startswith('MIDCPNIFTY'):
+                                elif symbol.startswith(('MIDCPNIFTY2', 'MIDCPNIFTY3')):
                                     index_name = 'MIDCPNIFTY'
                                 elif symbol.startswith('SENSEX'):
                                     index_name = 'SENSEX'
                                 
-                                print(f"Identified index name: {index_name}")
+                                print(f"Identified index name: {index_name} from symbol: {symbol}")
                                 
                                 if index_name:
                                     # Extract strike and option type from the tradingsymbol
@@ -201,15 +203,25 @@ class ExcelWebSocketHandler:
                                     strike = float(strike_str)
                                     
                                     # Fix strike prices by removing prefixes
-                                    if index_name == 'NIFTY' and strike > 50000:
+                                    if index_name == 'NIFTY':
                                         strike_str = str(int(strike))
-                                        if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                                        if strike > 50000 and strike_str.startswith('6'):  # Remove leading 6 for NIFTY
                                             strike = float(strike_str[1:])
-                                    elif index_name == 'SENSEX' and strike > 40000:
+                                    elif index_name == 'BANKNIFTY':
                                         strike_str = str(int(strike))
-                                        if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                        if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for BANKNIFTY
                                             strike = float(strike_str[1:])
-                                            
+                                    elif index_name == 'FINNIFTY':
+                                        strike = float(strike)  # No modification needed for FINNIFTY
+                                    elif index_name == 'MIDCPNIFTY':
+                                        strike_str = str(int(strike))
+                                        if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for MIDCPNIFTY
+                                            strike = float(strike_str[1:])
+                                    elif index_name == 'SENSEX':
+                                        strike_str = str(int(strike))
+                                        if strike > 40000 and strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                            strike = float(strike_str[1:])
+
                                     option_type = 'CE' if 'CE' in symbol else 'PE'
                                     
                                     print(f"Extracted strike: {strike}, option type: {option_type}")
@@ -233,7 +245,9 @@ class ExcelWebSocketHandler:
                                     'bid_qty': buy_depth.get('quantity', 0),
                                     'ask_price': sell_depth.get('price', 0.0),
                                     'ask_qty': sell_depth.get('quantity', 0),
-                                        'timestamp': current_time
+                                        'timestamp': current_time,
+                                        'index_name': index_name,  # Add index name for easier filtering
+                                        'expiry': self.instrument_lookup.get(symbol, {}).get('expiry')  # Add expiry date
                                     }
                                     print(f"Updated options data for {full_symbol}:")
                                     print(f"  LTP: {last_price}")
@@ -350,12 +364,12 @@ class ExcelWebSocketHandler:
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-origin'
             }
-            
+
             futures_tokens = []
-            
+
             # Get current date for expiry comparison
             current_date = datetime.now(pytz.timezone('Asia/Kolkata')).date()
-            
+
             # Map index names to their futures symbols and exchanges
             index_futures_map = {
                 'NFO': {
@@ -368,30 +382,31 @@ class ExcelWebSocketHandler:
                     'SENSEX': 'SENSEX'
                 }
             }
-            
+
             # Store last traded volumes for each symbol
             self.last_traded_volumes = {}
-            
+
             # Fetch from NFO and BFO with their respective indices
             for exchange, symbols in index_futures_map.items():
                 try:
                     print(f"\nFetching {exchange} instruments...")
                     response = requests.get('https://api.kite.trade/instruments', headers=headers)
                     print(f"{exchange} response status: {response.status_code}")
-                    
+
                     if response.status_code == 200:
                         print(f"Successfully fetched {exchange} instruments")
+
                         instruments = response.text.strip().split('\n')
                         instruments = [row.split(',') for row in instruments[1:]]  # Skip header
-                        
+
                         # Store nearest expiry contracts for each symbol
                         nearest_expiry_contracts = {}
-                        
+
                         for row in instruments:
                             try:
                                 if len(row) < 12:  # Basic validation
                                     continue
-                                
+
                                 instrument_token = int(row[0])
                                 tradingsymbol = row[2]
                                 name = row[3].strip('"')
@@ -399,11 +414,11 @@ class ExcelWebSocketHandler:
                                 instrument_type = row[9]
                                 segment = row[10]
                                 exchange_from_row = row[11]
-                                
+
                                 # Only process instruments from the current exchange
                                 if exchange_from_row != exchange:
                                     continue
-                                
+
                                 # Process only futures instruments
                                 if instrument_type == 'FUT':
                                     # Check for each symbol we're interested in
@@ -421,17 +436,17 @@ class ExcelWebSocketHandler:
                                                         'display_name': display_name
                                                     }
                                                     print(f"Found {futures_symbol} futures expiring on {expiry}")
-                            
+
                             except (IndexError, ValueError) as e:
                                 print(f"Error processing row: {str(e)}")
                                 continue
-                        
+
                         # Subscribe to the nearest expiry contracts
                         for contract_info in nearest_expiry_contracts.values():
                             token = contract_info['token']
                             display_name = contract_info['display_name']
                             expiry = contract_info['expiry']
-                            
+
                             futures_tokens.append(token)
                             # Store with the format expected by the Excel updater
                             display_name_map = {
@@ -443,41 +458,42 @@ class ExcelWebSocketHandler:
                             }
                             excel_symbol = f"{display_name_map[display_name]} FUT"
                             self.token_symbol_map[str(token)] = excel_symbol
+
                             # Initialize volume tracking for this symbol
                             self.last_traded_volumes[excel_symbol] = 0
                             print(f"Added nearest futures token {token} for {display_name} expiring on {expiry}")
-                    
+
                     else:
                         print(f"Error getting {exchange} instruments: {response.status_code}")
                         print(f"Response text: {response.text}")
-                        
+
                 except Exception as e:
                     print(f"Error fetching {exchange} instruments: {str(e)}")
                     print(f"Full error: ", exc_info=True)
-            
+
             if futures_tokens:
                 print(f"\nSubscribing to {len(futures_tokens)} futures tokens: {futures_tokens}")
                 # Subscribe with LTP mode first for faster updates
                 self.kws.subscribe(futures_tokens)
                 self.kws.set_mode(self.kws.MODE_LTP, futures_tokens)
                 print("Subscribed to futures tokens in LTP mode")
-                
+
                 # Then set FULL mode for detailed data
                 time.sleep(0.5)  # Small delay before changing mode
                 self.kws.set_mode(self.kws.MODE_FULL, futures_tokens)
                 print("Changed futures tokens to FULL mode")
-                
+
                 print("Token to symbol mapping for futures:")
                 for token in futures_tokens:
                     print(f"{token}: {self.token_symbol_map.get(str(token), 'Unknown')}")
             else:
                 print("No valid futures tokens found!")
-                
+
         except Exception as e:
             logger.error(f"Error subscribing to futures: {str(e)}")
             print(f"Error subscribing to futures: {str(e)}")
             print("Full error: ", exc_info=True)
-            
+
     def _subscribe_options(self, market_data):
         """Subscribe to options based on spot prices."""
         try:
@@ -492,7 +508,7 @@ class ExcelWebSocketHandler:
                 'NIFTY MID SELECT': {'symbol': 'MIDCPNIFTY', 'expiry_type': 'monthly'},
                 'SENSEX': {'symbol': 'SENSEX', 'expiry_type': 'weekly'}
             }
-            
+
             print("\nFetching NFO instruments...")
             # Get instruments from Kite API
             headers = {
@@ -510,19 +526,19 @@ class ExcelWebSocketHandler:
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-origin'
             }
-            
+
             # Get NFO instruments
             response = requests.get('https://api.kite.trade/instruments', headers=headers)
             if response.status_code == 200:
                 print("Successfully fetched NFO instruments")
                 instruments = response.text.strip().split('\n')
                 instruments = [row.split(',') for row in instruments[1:]]  # Skip header
-                
+
                 # Get current date for expiry comparison
                 current_date = datetime.now(pytz.timezone('Asia/Kolkata')).date()
-                
+
                 # Create instrument lookup
-                instrument_lookup = {}
+                self.instrument_lookup.clear()  # Clear existing lookup
                 for row in instruments:
                     try:
                         instrument_token = int(row[0])
@@ -532,23 +548,38 @@ class ExcelWebSocketHandler:
                         strike = float(row[6]) if row[6] else 0
                         instrument_type = row[9]  # CE or PE
                         exchange = row[11]
-                        
+
                         # Fix strike prices by removing prefixes
-                        if tradingsymbol.startswith('NIFTY') and strike > 50000:
+                        if tradingsymbol.startswith('NIFTY') and not tradingsymbol.startswith(('FINNIFTY', 'BANKNIFTY', 'MIDCPNIFTY')):
                             strike_str = str(int(strike))
-                            if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                            if strike > 50000 and strike_str.startswith('6'):  # Remove leading 6 for NIFTY
                                 strike = float(strike_str[1:])
-                        elif tradingsymbol.startswith('SENSEX') and strike > 40000:
+                        elif tradingsymbol.startswith('BANKNIFTY'):
                             strike_str = str(int(strike))
-                            if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                            if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for BANKNIFTY
                                 strike = float(strike_str[1:])
-                        
+                        elif tradingsymbol.startswith('FINNIFTY'):
+                            strike = float(strike)  # No modification needed for FINNIFTY
+                        elif tradingsymbol.startswith('MIDCPNIFTY'):
+                            strike_str = str(int(strike))
+                            if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for MIDCPNIFTY
+                                strike = float(strike_str[1:])
+                        elif tradingsymbol.startswith('SENSEX'):
+                            strike_str = str(int(strike))
+                            if strike > 40000 and strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                strike = float(strike_str[1:])
+
                         # Only process NFO/BFO instruments that are options and have future expiry
-                        if ((exchange == 'NFO' and tradingsymbol.startswith(('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'))) or \
+                        if ((exchange == 'NFO' and (
+                            tradingsymbol.startswith(('NIFTY2', 'NIFTY3')) or  # NIFTY options
+                            tradingsymbol.startswith(('BANKNIFTY2', 'BANKNIFTY3')) or  # BANKNIFTY options
+                            tradingsymbol.startswith(('FINNIFTY2', 'FINNIFTY3')) or  # FINNIFTY options
+                            tradingsymbol.startswith(('MIDCPNIFTY2', 'MIDCPNIFTY3'))  # MIDCPNIFTY options
+                        )) or \
                             (exchange == 'BFO' and tradingsymbol.startswith('SENSEX'))) and \
                            instrument_type in ['CE', 'PE'] and expiry and expiry >= current_date:
                             # Store with all details needed for filtering
-                            instrument_lookup[tradingsymbol] = {
+                            self.instrument_lookup[tradingsymbol] = {
                                 'token': instrument_token,
                                 'name': name,
                                 'expiry': expiry,
@@ -557,21 +588,38 @@ class ExcelWebSocketHandler:
                                 'symbol': tradingsymbol,
                                 'exchange': exchange
                             }
+                            print(f"Added instrument: {tradingsymbol} with strike {strike}")  # Debug print
                     except (IndexError, ValueError) as e:
                         continue
-                
-                print(f"\nProcessing {len(instrument_lookup)} instruments...")
-                
+
+                print(f"\nProcessing {len(self.instrument_lookup)} instruments...")
+                print(f"Available market data symbols: {list(market_data.keys())}")
+
                 for spot_symbol, index_info in index_map.items():
                     index_name = index_info['symbol']
                     expiry_type = index_info['expiry_type']
-                    
+
                 # Get current spot price from the correct symbol
                     spot_data = next((data for sym, data in market_data.items() if sym == spot_symbol), None)
-                    if spot_data:
-                        spot_price = spot_data.get('last_price', 0)
-                if spot_price > 0:
-                            print(f"\nProcessing {index_name} at spot price {spot_price}")
+                    print(f"Looking for spot data for {spot_symbol}: {spot_data}")
+                    if not spot_data:
+                        # Try alternate symbol formats
+                        if spot_symbol == 'NIFTY 50':
+                            spot_data = next((data for sym, data in market_data.items() if sym in ['NIFTY', 'NIFTY50']), None)
+                        elif spot_symbol == 'NIFTY FIN SERVICE':
+                            spot_data = next((data for sym, data in market_data.items() if sym in ['FINNIFTY', 'NIFTY FIN SERV']), None)
+                        print(f"Tried alternate symbols for {spot_symbol}, got: {spot_data}")
+                    
+                    if not spot_data:
+                        print(f"No spot data found for {spot_symbol}")
+                        continue
+
+                    spot_price = spot_data.get('last_price', 0)
+                    if spot_price <= 0:
+                        print(f"Invalid spot price for {spot_symbol}: {spot_price}")
+                        continue
+
+                    print(f"\nProcessing {index_name} at spot price {spot_price}")
                     
                     # Calculate ATM strike
                     strike_gap = {
@@ -581,48 +629,69 @@ class ExcelWebSocketHandler:
                         'MIDCPNIFTY': 50,
                         'SENSEX': 100
                     }.get(index_name, 50)
-                    
+
                     atm_strike = round(spot_price / strike_gap) * strike_gap
                     print(f"Index: {index_name}, Spot: {spot_price}, ATM: {atm_strike}, Gap: {strike_gap}")
-                    
+
                     # Get 5 strikes above and below ATM
                     strikes = [atm_strike + (i - 5) * strike_gap for i in range(11)]
                     print(f"Generated strikes for {index_name}: {strikes}")
-                    
+
                     # Find instruments for this index
                     matching_instruments = {}
-                    for symbol, info in instrument_lookup.items():
+                    for symbol, info in self.instrument_lookup.items():
                         try:
-                            if symbol.startswith(index_name):  # Check if this is the right index
+                            # Check if this is the right index using a more flexible matching
+                            is_matching_index = False
+                            if index_name == 'NIFTY' and symbol.startswith(('NIFTY2', 'NIFTY3')):
+                                is_matching_index = True
+                            elif index_name == 'BANKNIFTY' and symbol.startswith(('BANKNIFTY2', 'BANKNIFTY3')):
+                                is_matching_index = True
+                            elif index_name == 'FINNIFTY' and symbol.startswith(('FINNIFTY2', 'FINNIFTY3')):
+                                is_matching_index = True
+                            elif index_name == 'MIDCPNIFTY' and symbol.startswith(('MIDCPNIFTY2', 'MIDCPNIFTY3')):
+                                is_matching_index = True
+                            elif index_name == 'SENSEX' and symbol.startswith('SENSEX'):
+                                is_matching_index = True
+
+                            if is_matching_index:
                                 strike = info['strike']  # Use strike from instrument info
-                                
+
                                 # Fix strike prices by removing prefixes
-                                if index_name == 'NIFTY' and strike > 50000:
+                                if index_name == 'NIFTY':
                                     strike_str = str(int(strike))
-                                    if strike_str.startswith('6'):  # Remove leading 6 for NIFTY
+                                    if strike > 50000 and strike_str.startswith('6'):  # Remove leading 6 for NIFTY
                                         strike = float(strike_str[1:])
-                                        info['strike'] = strike  # Update the strike in info
-                                elif index_name == 'SENSEX' and strike > 40000:
+                                elif index_name == 'BANKNIFTY':
                                     strike_str = str(int(strike))
-                                    if strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                    if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for BANKNIFTY
                                         strike = float(strike_str[1:])
-                                        info['strike'] = strike  # Update the strike in info
-                                
+                                elif index_name == 'FINNIFTY':
+                                    strike = float(strike)  # No modification needed for FINNIFTY
+                                elif index_name == 'MIDCPNIFTY':
+                                    strike_str = str(int(strike))
+                                    if strike > 50000 and strike_str.startswith('4'):  # Remove leading 4 for MIDCPNIFTY
+                                        strike = float(strike_str[1:])
+                                elif index_name == 'SENSEX':
+                                    strike_str = str(int(strike))
+                                    if strike > 40000 and strike_str.startswith('4'):  # Remove leading 4 for SENSEX
+                                        strike = float(strike_str[1:])
+
                                 if strike in strikes:
                                     matching_instruments[symbol] = info
                                     print(f"Matched {index_name} strike: {strike} from symbol: {symbol}")
                         except Exception as e:
-                            print(f"Error processing symbol {symbol}: {str(e)}")
+                            print(f"Error processing instrument {symbol}: {str(e)}")
                             continue
-                    
+
                     if matching_instruments:
                         print(f"\nFound {len(matching_instruments)} matching instruments for {index_name}")
                         print(f"Sample strikes: {sorted(set(info['strike'] for info in matching_instruments.values()))[:5]}")
                         print(f"Sample symbols: {list(matching_instruments.keys())[:2]}")
-                        
+
                         # Get all expiries for this index
                         expiries = sorted(set(info['expiry'] for info in matching_instruments.values() if info['expiry']))
-                        
+
                         if expiries:
                             # For weekly expiry (NIFTY and SENSEX), get the nearest expiry
                             # For monthly expiry (others), get the nearest monthly expiry
@@ -639,7 +708,7 @@ class ExcelWebSocketHandler:
                                     nearest_expiry = min(monthly_expiries)
                                 else:
                                     nearest_expiry = min(expiries)  # Fallback to nearest expiry
-                            
+
                             print(f"Found {len(matching_instruments)} matching instruments")
                             print(f"Using expiry: {nearest_expiry}")
                     
@@ -647,16 +716,21 @@ class ExcelWebSocketHandler:
                     for strike in strikes:
                         # Try to find PE and CE contracts
                         for symbol, info in matching_instruments.items():
-                            if (info['expiry'] == nearest_expiry and 
+                            if (info['expiry'] == nearest_expiry and
                                 abs(info['strike'] - strike) < 0.01):  # Compare with small tolerance
-                                
+
                                 token = info['token']
                                 opt_type = info['type']
-                                
+
+                                # Add token to subscription list
                                 options_tokens.append(token)
+                                
                                 # Store the full tradingsymbol in the token map
                                 self.token_symbol_map[str(token)] = info['symbol']
-                                print(f"Added {opt_type} token {token} for {index_name} {strike}")
+                                
+                                # Create the full symbol for options data storage
+                                full_symbol = f"{index_name}_{strike}_{opt_type}"
+                                print(f"Added {opt_type} token {token} for {index_name} {strike} -> {full_symbol}")
             
             if options_tokens:
                 print(f"\nSubscribing to {len(options_tokens)} options tokens")
@@ -764,11 +838,6 @@ class ExcelWebSocketHandler:
                         ce_data['strike'] = strike
                         ce_data['option_type'] = 'CE'
                         ce_data['is_atm'] = strike == atm_strike
-                
-            logger.debug(f"Updated options chain for {symbol} with {len(strikes)} strikes")
-            
-        except Exception as e:
-            logger.error(f"Error updating options chain for {symbol}: {str(e)}") 
                 
             logger.debug(f"Updated options chain for {symbol} with {len(strikes)} strikes")
             
